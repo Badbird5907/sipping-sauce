@@ -1,6 +1,7 @@
 import random
 
 from partyline_llm.profiles import (
+    PARTYLINE_PROFILE,
     RandomProfileCycle,
     SPOOKY_PROFILE,
     SPOOKY_PROFILES,
@@ -23,6 +24,23 @@ def test_666_has_varied_personalities_with_short_greetings() -> None:
     )
     assert all("666" in profile.instructions for profile in SPOOKY_PROFILES)
     assert all(0 < len(profile.greeting) <= 80 for profile in SPOOKY_PROFILES)
+
+
+def test_every_personality_has_comedy_and_ai_accusation_rules() -> None:
+    profiles = (PARTYLINE_PROFILE, *SPOOKY_PROFILES)
+
+    assert all(
+        "first job is to be funny" in profile.instructions for profile in profiles
+    )
+    assert all(
+        "Never sound like customer support" in profile.instructions
+        for profile in profiles
+    )
+    assert all("vehement" in profile.instructions for profile in profiles)
+    assert all(
+        "Accuse the caller of being the AI" in profile.instructions
+        for profile in profiles
+    )
 
 
 def test_random_profile_cycle_uses_every_personality_before_repeating() -> None:
