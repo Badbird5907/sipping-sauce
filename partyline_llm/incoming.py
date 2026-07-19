@@ -8,7 +8,7 @@ from pyVoIP.VoIP import CallState, InvalidStateError, VoIPCall, VoIPPhone
 
 from .config import Settings
 from .phone import create_phone, safe_hangup, wait_for_registration
-from .profiles import BotProfile
+from .profiles import ProfileSource, resolve_profile
 from .realtime import RealtimeSIPBridge
 
 
@@ -18,7 +18,7 @@ LOG = logging.getLogger(__name__)
 class SIPIncomingClient:
     """Register a SIP endpoint and bridge one incoming call at a time."""
 
-    def __init__(self, settings: Settings, profile: BotProfile) -> None:
+    def __init__(self, settings: Settings, profile: ProfileSource) -> None:
         self.settings = settings
         self.profile = profile
         self.phone: VoIPPhone | None = None
@@ -99,8 +99,10 @@ class SIPIncomingClient:
                     )
                     LOG.info("Answering incoming call from %s", caller)
                     self.call.answer()
+                    selected_profile = resolve_profile(self.profile)
+                    LOG.info("Using personality %s", selected_profile.name)
                     await RealtimeSIPBridge(
-                        self.settings, self.profile
+                        self.settings, selected_profile
                     ).run(self.call)
                 except Exception:
                     LOG.exception("Incoming call session failed")
@@ -125,7 +127,7 @@ class SIPIncomingClient:
 
 
 async def run_incoming_forever(
-    settings: Settings, profile: BotProfile, *, once: bool = False
+    settings: Settings, profile: ProfileSource, *, once: bool = False
 ) -> None:
     if settings.sip_transport == "tcp":
         from .tcp_sip import run_tcp_incoming_forever

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .cli import build_parser, configure_logging, load_settings_or_exit
 from .incoming import run_incoming_forever
-from .profiles import SPOOKY_PROFILE
+from .profiles import RandomProfileCycle, SPOOKY_PROFILES
 
 
 def main() -> None:
@@ -27,15 +27,22 @@ def main() -> None:
         max_concurrent_calls_default=4,
     )
     configure_logging(settings)
-    profile = SPOOKY_PROFILE.configured("SPOOKY", include_generic=False)
+    profiles = tuple(
+        profile.configured("SPOOKY", include_generic=False)
+        for profile in SPOOKY_PROFILES
+    )
+    profile_cycle = RandomProfileCycle(profiles)
 
     if args.check:
-        print(f"Configuration OK: spooky profile, {settings.summary()}")
+        print(
+            f"Configuration OK: {len(profiles)} rotating 666 personalities, "
+            f"{settings.summary()}"
+        )
         return
 
     try:
         asyncio.run(
-            run_incoming_forever(settings, profile, once=args.once)
+            run_incoming_forever(settings, profile_cycle, once=args.once)
         )
     except KeyboardInterrupt:
         print("\nThe line has gone quiet.")

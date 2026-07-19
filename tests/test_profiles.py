@@ -1,4 +1,10 @@
-from partyline_llm.profiles import SPOOKY_PROFILE
+import random
+
+from partyline_llm.profiles import (
+    RandomProfileCycle,
+    SPOOKY_PROFILE,
+    SPOOKY_PROFILES,
+)
 
 
 def test_spooky_profile_is_fictional_and_has_a_greeting() -> None:
@@ -8,6 +14,27 @@ def test_spooky_profile_is_fictional_and_has_a_greeting() -> None:
     assert "BOMBACLATT" in SPOOKY_PROFILE.greeting
     assert SPOOKY_PROFILE.voice == "cedar"
     assert SPOOKY_PROFILE.greeting
+
+
+def test_666_has_varied_personalities_with_short_greetings() -> None:
+    assert len(SPOOKY_PROFILES) >= 4
+    assert len({profile.name for profile in SPOOKY_PROFILES}) == len(
+        SPOOKY_PROFILES
+    )
+    assert all("666" in profile.instructions for profile in SPOOKY_PROFILES)
+    assert all(0 < len(profile.greeting) <= 80 for profile in SPOOKY_PROFILES)
+
+
+def test_random_profile_cycle_uses_every_personality_before_repeating() -> None:
+    cycle = RandomProfileCycle(SPOOKY_PROFILES, rng=random.Random(666))
+
+    selected = [cycle() for _ in range(len(SPOOKY_PROFILES) * 3)]
+
+    for start in range(0, len(selected), len(SPOOKY_PROFILES)):
+        assert set(selected[start : start + len(SPOOKY_PROFILES)]) == set(
+            SPOOKY_PROFILES
+        )
+    assert all(left is not right for left, right in zip(selected, selected[1:]))
 
 
 def test_spooky_profile_ignores_generic_partyline_prompt(monkeypatch) -> None:

@@ -6,9 +6,9 @@ and OpenAI Realtime bridge:
 - `partyline-llm` registers a SIP endpoint and calls the existing `*99` party
   line.
 - `spooky-llm` registers as extension `666`, waits for incoming calls, and
-  answers as Duppy Devil, a profane fictional Jamaican dancehall devil. It uses a persistent SIP/TCP
-  connection by default so incoming calls work through NAT without an inbound
-  SIP port forward.
+  rotates through a shuffled cast of funny supernatural personalities. It uses
+  a persistent SIP/TCP connection by default so incoming calls work through NAT
+  without an inbound SIP port forward.
 
 It is designed for the topology visible in `SEPD0C78915E83F.cnf.xml`:
 
@@ -105,7 +105,7 @@ For a single attempt while testing:
 uv run partyline-llm --once
 ```
 
-### Incoming spooky bot on 666
+### Incoming personality roulette on 666
 
 Validate its separate configuration:
 
@@ -168,7 +168,8 @@ passwords are never written to logs.
   `SPOOKY_OPENAI_VOICE`: customize the
   extension-666 experience. The spooky executable intentionally ignores generic
   `OPENAI_INSTRUCTIONS`, `OPENAI_GREETING`, and `OPENAI_VOICE` values from the
-  party-line `.env`.
+  party-line `.env`. Built-in personalities are shuffled per call; every one is
+  used once before the next shuffled cycle begins.
 
 The audio path is full duplex. OpenAI's server voice activity detection
 decides when someone has finished a turn, and queued bot audio is dropped when

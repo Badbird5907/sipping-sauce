@@ -20,7 +20,7 @@ from .audio import (
     pyvoip_u8_to_pcmu,
 )
 from .config import Settings
-from .profiles import BotProfile
+from .profiles import ProfileSource, resolve_profile
 from .realtime import RealtimeSIPBridge
 from .sip_digest import digest_authorization_value
 
@@ -545,17 +545,19 @@ class TCPSIPPhone:
 
 
 async def run_tcp_incoming_forever(
-    settings: Settings, profile: BotProfile, *, once: bool = False
+    settings: Settings, profile: ProfileSource, *, once: bool = False
 ) -> None:
     async def serve_call(phone: TCPSIPPhone, call: TCPAudioCall) -> None:
+        selected_profile = resolve_profile(profile)
         LOG.info(
-            "Starting call %s (%s/%s active)",
+            "Starting call %s as %s (%s/%s active)",
             call.call_id,
+            selected_profile.name,
             phone.active_call_count,
             settings.max_concurrent_calls,
         )
         try:
-            await RealtimeSIPBridge(settings, profile).run(call)
+            await RealtimeSIPBridge(settings, selected_profile).run(call)
         except asyncio.CancelledError:
             raise
         except Exception:
