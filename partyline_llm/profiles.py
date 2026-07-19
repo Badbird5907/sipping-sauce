@@ -196,6 +196,7 @@ SPOOKY_PROFILES = (
             "to order."
         ),
         greeting="Welcome to Wendy's, what can I get started for you?",
+        voice="rex"
     )
     # BotProfile(
     #     name="hell-cruise-director",
