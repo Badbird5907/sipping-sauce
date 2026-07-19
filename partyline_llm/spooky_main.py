@@ -28,7 +28,11 @@ def main() -> None:
     )
     configure_logging(settings)
     profiles = tuple(
-        profile.configured("SPOOKY", include_generic=False)
+        profile.configured(
+            "SPOOKY",
+            provider=settings.realtime_provider,
+            include_generic=False,
+        )
         for profile in SPOOKY_PROFILES
     )
     profile_cycle = RandomProfileCycle(profiles)

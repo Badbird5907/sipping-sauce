@@ -9,12 +9,14 @@ from .sip import run_forever
 
 def main() -> None:
     parser = build_parser(
-        "Join a SIP party line and bridge it to OpenAI Realtime.", ".env"
+        "Join a SIP party line and bridge it to a Realtime voice agent.", ".env"
     )
     args = parser.parse_args()
     settings = load_settings_or_exit(args.env_file)
     configure_logging(settings)
-    profile = PARTYLINE_PROFILE.configured("PARTYLINE")
+    profile = PARTYLINE_PROFILE.configured(
+        "PARTYLINE", provider=settings.realtime_provider
+    )
 
     if args.check:
         print(f"Configuration OK: {settings.summary()}")

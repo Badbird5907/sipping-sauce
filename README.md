@@ -1,7 +1,8 @@
 # SIP voice bots
 
 This project provides two voice bots built on the same SIP, G.711, digest-auth,
-and OpenAI Realtime bridge:
+and realtime voice bridge. Grok Voice is active by default; GPT Realtime remains
+available as a configuration switch:
 
 - `partyline-llm` registers a SIP endpoint and calls the existing `*99` party
   line.
@@ -32,7 +33,7 @@ For the spooky bot, provision a separate PJSIP endpoint with auth username
 `666`, a new password, and an AOR/contact that allows it to register. Calls to
 extension `666` must route to that registered endpoint. The TCP bot accepts up
 to `MAX_CONCURRENT_CALLS` simultaneous calls (four by default), with an
-independent OpenAI Realtime session and RTP stream for every caller. Additional
+independent realtime voice session and RTP stream for every caller. Additional
 callers receive SIP Busy until a slot opens.
 
 The included `dialplan.xml` adds an immediate `666` match for the Cisco phones.
@@ -56,12 +57,13 @@ Copy-Item .env.spooky.example .env.spooky
 group, including pytest. The checked-in `uv.lock` keeps installs reproducible.
 
 Edit `.env` for the party-line bot and `.env.spooky` for the incoming bot. Set
-the corresponding SIP passwords and an OpenAI API key in each file.
+the corresponding SIP passwords and an xAI API key in each file.
 
 Party-line minimum settings:
 
 ```dotenv
-OPENAI_API_KEY=sk-...
+REALTIME_PROVIDER=xai
+XAI_API_KEY=xai-...
 SIP_USERNAME=199
 SIP_PASSWORD=the-new-bot-extension-password
 ```
@@ -69,7 +71,8 @@ SIP_PASSWORD=the-new-bot-extension-password
 Spooky bot minimum settings:
 
 ```dotenv
-OPENAI_API_KEY=sk-...
+REALTIME_PROVIDER=xai
+XAI_API_KEY=xai-...
 SIP_USERNAME=666
 SIP_PASSWORD=the-extension-666-password
 ```
@@ -86,7 +89,7 @@ that port and for `SIP_RTP_PORT_LOW` through `SIP_RTP_PORT_HIGH`.
 
 ### Party-line bot
 
-Validate configuration without contacting SIP or OpenAI:
+Validate configuration without contacting SIP or the voice provider:
 
 ```powershell
 uv run partyline-llm --check
@@ -142,39 +145,43 @@ passwords are never written to logs.
 
 ## Useful settings
 
-- `OPENAI_REALTIME_MODEL`: defaults to `gpt-realtime-2.1`.
-- `OPENAI_VOICE`: defaults to `marin`.
-- `OPENAI_OUTPUT_GAIN`: playback amplification applied to the bot voice; defaults
+- `REALTIME_PROVIDER`: `xai` by default; set it to `openai` to restore GPT
+  Realtime without changing code.
+- `XAI_API_KEY`: required while `REALTIME_PROVIDER=xai`.
+- `XAI_REALTIME_MODEL`: defaults to `grok-voice-latest`.
+- `XAI_VOICE`: defaults to `eve`. xAI also exposes the current voice catalog at
+  `GET https://api.x.ai/v1/tts/voices`.
+- `XAI_OUTPUT_GAIN`: playback amplification applied to the bot voice; defaults
   to `2.0` (about +6 dB), with clipping at the telephone codec's limits.
-- `SPOOKY_OPENAI_VOICE`: defaults to `cedar` for the extension-666 character
-  and overrides the generic voice only for `spooky-llm`.
-- `OPENAI_VAD_THRESHOLD`: speech activation threshold from `0` to `1`; defaults
-  to `0.75` so telephone background noise is less likely to trigger a turn.
-- `OPENAI_VAD_PREFIX_PADDING_MS`: audio retained before detected speech;
-  defaults to `300`.
-- `OPENAI_VAD_SILENCE_DURATION_MS`: quiet time required to end a turn; defaults
+- `SPOOKY_XAI_VOICE`: optional Grok voice override only for `spooky-llm`.
+- `XAI_VAD_THRESHOLD`: speech activation threshold from `0.1` to `0.9`;
+  defaults to `0.85`.
+- `XAI_VAD_PREFIX_PADDING_MS`: audio retained before detected speech; defaults
+  to `333`.
+- `XAI_VAD_SILENCE_DURATION_MS`: quiet time required to end a turn; defaults
   to `900`.
-- `OPENAI_INSTRUCTIONS`: generic behavior override for the selected bot.
-- `OPENAI_GREETING`: generic greeting override; leave empty for a silent join.
+- `XAI_INSTRUCTIONS`: generic behavior override for the selected bot.
+- `XAI_GREETING`: generic greeting override; leave empty for a silent join.
+- `OPENAI_API_KEY`, `OPENAI_REALTIME_MODEL`, `OPENAI_VOICE`, and the matching
+  OpenAI VAD/gain settings remain available when `REALTIME_PROVIDER=openai`.
 - `SIP_PARTYLINE`: defaults to `*99`.
 - `SIP_TRANSPORT`: `spooky-llm` defaults to `tcp`; the party-line bot defaults
   to `udp`.
 - `RECONNECT_SECONDS`: delay before another registration/call attempt.
 - `MAX_CONCURRENT_CALLS`: simultaneous incoming TCP calls; defaults to `4` for
   `spooky-llm`.
-- `PARTYLINE_OPENAI_INSTRUCTIONS` and `PARTYLINE_OPENAI_GREETING`: override the
-  party-line personality without changing the spooky bot.
-- `SPOOKY_OPENAI_INSTRUCTIONS`, `SPOOKY_OPENAI_GREETING`, and
-  `SPOOKY_OPENAI_VOICE`: customize the
-  extension-666 experience. The spooky executable intentionally ignores generic
-  `OPENAI_INSTRUCTIONS`, `OPENAI_GREETING`, and `OPENAI_VOICE` values from the
-  party-line `.env`. Built-in personalities are shuffled per call; every one is
-  used once before the next shuffled cycle begins.
+- `PARTYLINE_REALTIME_INSTRUCTIONS` and `PARTYLINE_REALTIME_GREETING`: override
+  the party-line personality without changing the spooky bot.
+- `SPOOKY_REALTIME_INSTRUCTIONS`, `SPOOKY_REALTIME_GREETING`, and the
+  provider-specific spooky voice setting customize extension 666. The spooky
+  executable intentionally ignores generic prompt, greeting, and voice values
+  from the party-line `.env`. Built-in personalities are shuffled per call;
+  every one is used once before the next shuffled cycle begins.
 
-The audio path is full duplex. OpenAI's server voice activity detection
+The audio path is full duplex. The selected provider's server voice detection
 decides when someone has finished a turn, and queued bot audio is dropped when
 new caller speech begins so interruptions feel natural. A quiet telephone dial
-tone plays after the SIP call connects and stops when the OpenAI WebSocket is
+tone plays after the SIP call connects and stops when the provider WebSocket is
 ready.
 
 ## Adding another version
@@ -198,9 +205,8 @@ Realtime bridge remain shared.
 - The bot talks to itself: configure the PBX conference not to loop a
   participant's transmitted audio back to that same participant.
 
-## Why the bridge uses WebSocket instead of OpenAI's SIP endpoint
+## Why the bridge uses a Realtime WebSocket
 
-OpenAI also supports sending a public SIP trunk directly to its SIP endpoint.
 For this private-LAN party line, registering a local endpoint and using a
 server-to-server Realtime WebSocket avoids exposing the PBX, hosting a public
 call webhook, or changing the existing conference routing.

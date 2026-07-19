@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "partyline-llm"
 version = "0.1.0"
-description = "Bridge a SIP party line to the OpenAI Realtime API"
+description = "Bridge SIP calls to Grok Voice or OpenAI Realtime agents"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = [

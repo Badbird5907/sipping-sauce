@@ -19,13 +19,17 @@ class FakeCall:
 
 def settings() -> Settings:
     return Settings(
+        realtime_provider="xai",
+        xai_api_key="xai-test-key",
+        xai_model="grok-voice-latest",
+        xai_voice="eve",
         openai_api_key="test-key",
         openai_model="gpt-realtime-2.1",
         openai_voice="marin",
         openai_safety_identifier="safe-id",
-        openai_vad_threshold=0.75,
-        openai_vad_prefix_padding_ms=300,
-        openai_vad_silence_duration_ms=900,
+        realtime_vad_threshold=0.85,
+        realtime_vad_prefix_padding_ms=333,
+        realtime_vad_silence_duration_ms=900,
         sip_server="10.13.37.10",
         sip_port=5060,
         sip_transport="tcp",

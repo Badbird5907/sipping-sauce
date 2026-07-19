@@ -7,20 +7,26 @@ from partyline_llm.profiles import PARTYLINE_PROFILE, SPOOKY_PROFILE
 from partyline_llm.realtime import (
     CONNECTING_TONE,
     RealtimeSIPBridge,
+    connection_details,
     greeting_event,
+    greeting_events,
     session_update_event,
 )
 
 
-def settings() -> Settings:
+def settings(provider: str = "xai") -> Settings:
     return Settings(
+        realtime_provider=provider,
+        xai_api_key="xai-test-key",
+        xai_model="grok-voice-latest",
+        xai_voice="eve",
         openai_api_key="test-key",
         openai_model="gpt-realtime-2.1",
         openai_voice="marin",
         openai_safety_identifier="safe-id",
-        openai_vad_threshold=0.75,
-        openai_vad_prefix_padding_ms=300,
-        openai_vad_silence_duration_ms=900,
+        realtime_vad_threshold=0.85 if provider == "xai" else 0.75,
+        realtime_vad_prefix_padding_ms=333 if provider == "xai" else 300,
+        realtime_vad_silence_duration_ms=900,
         sip_server="10.13.37.10",
         sip_port=5060,
         sip_transport="udp",
@@ -42,30 +48,58 @@ def settings() -> Settings:
 def test_session_uses_telephone_audio_in_both_directions() -> None:
     event = session_update_event(settings(), PARTYLINE_PROFILE)
     session = event["session"]
-    assert session["model"] == "gpt-realtime-2.1"
+    assert "model" not in session
     assert session["audio"]["input"]["format"] == {"type": "audio/pcmu"}
     assert session["audio"]["output"]["format"] == {"type": "audio/pcmu"}
-    assert session["audio"]["output"]["voice"] == "marin"
-    assert session["audio"]["input"]["turn_detection"] == {
+    assert session["voice"] == "eve"
+    assert session["turn_detection"] == {
         "type": "server_vad",
-        "threshold": 0.75,
-        "prefix_padding_ms": 300,
+        "threshold": 0.85,
+        "prefix_padding_ms": 333,
         "silence_duration_ms": 900,
-        "create_response": True,
-        "interrupt_response": True,
     }
 
 
-def test_spooky_profile_selects_its_own_voice() -> None:
+def test_xai_session_does_not_reuse_openai_profile_voice() -> None:
     event = session_update_event(settings(), SPOOKY_PROFILE)
 
-    assert event["session"]["audio"]["output"]["voice"] == "cedar"
+    assert event["session"]["voice"] == "eve"
+
+
+def test_openai_realtime_remains_supported() -> None:
+    current = settings("openai")
+    event = session_update_event(current, SPOOKY_PROFILE)
+    session = event["session"]
+    url, headers = connection_details(current)
+
+    assert session["model"] == "gpt-realtime-2.1"
+    assert session["audio"]["output"]["voice"] == "cedar"
+    assert session["audio"]["input"]["turn_detection"]["interrupt_response"]
+    assert url == "wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1"
+    assert headers["Authorization"] == "Bearer test-key"
+
+
+def test_xai_connection_uses_grok_voice_endpoint() -> None:
+    url, headers = connection_details(settings())
+
+    assert url == "wss://api.x.ai/v1/realtime?model=grok-voice-latest"
+    assert headers == {"Authorization": "Bearer xai-test-key"}
 
 
 def test_greeting_is_response_instruction() -> None:
     event = greeting_event("Hello.")
     assert event["type"] == "response.create"
     assert "Hello." in event["response"]["instructions"]
+
+
+def test_xai_greeting_creates_text_turn_then_response() -> None:
+    events = greeting_events("xai", "Hello.")
+
+    assert [event["type"] for event in events] == [
+        "conversation.item.create",
+        "response.create",
+    ]
+    assert "Hello." in events[0]["item"]["content"][0]["text"]
 
 
 def test_audio_queue_does_not_drop_long_responses() -> None:

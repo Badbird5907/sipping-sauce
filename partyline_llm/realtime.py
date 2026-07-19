@@ -35,7 +35,7 @@ TRANSCRIPT_DELTA_TYPES = {
 CONNECTING_TONE = telephone_tone((350, 440))
 
 
-def session_update_event(
+def _openai_session_update_event(
     settings: Settings, profile: BotProfile
 ) -> dict[str, Any]:
     return {
@@ -50,12 +50,12 @@ def session_update_event(
                     "format": {"type": "audio/pcmu"},
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": settings.openai_vad_threshold,
+                        "threshold": settings.realtime_vad_threshold,
                         "prefix_padding_ms": (
-                            settings.openai_vad_prefix_padding_ms
+                            settings.realtime_vad_prefix_padding_ms
                         ),
                         "silence_duration_ms": (
-                            settings.openai_vad_silence_duration_ms
+                            settings.realtime_vad_silence_duration_ms
                         ),
                         "create_response": True,
                         "interrupt_response": True,
@@ -63,14 +63,47 @@ def session_update_event(
                 },
                 "output": {
                     "format": {"type": "audio/pcmu"},
-                    "voice": profile.voice or settings.openai_voice,
+                    "voice": profile.voice_for("openai") or settings.openai_voice,
                 },
             },
         },
     }
 
 
+def _xai_session_update_event(
+    settings: Settings, profile: BotProfile
+) -> dict[str, Any]:
+    return {
+        "type": "session.update",
+        "session": {
+            "instructions": profile.instructions,
+            "voice": profile.voice_for("xai") or settings.xai_voice,
+            "turn_detection": {
+                "type": "server_vad",
+                "threshold": settings.realtime_vad_threshold,
+                "prefix_padding_ms": settings.realtime_vad_prefix_padding_ms,
+                "silence_duration_ms": (
+                    settings.realtime_vad_silence_duration_ms
+                ),
+            },
+            "audio": {
+                "input": {"format": {"type": "audio/pcmu"}},
+                "output": {"format": {"type": "audio/pcmu"}},
+            },
+        },
+    }
+
+
+def session_update_event(
+    settings: Settings, profile: BotProfile
+) -> dict[str, Any]:
+    if settings.realtime_provider == "xai":
+        return _xai_session_update_event(settings, profile)
+    return _openai_session_update_event(settings, profile)
+
+
 def greeting_event(greeting: str) -> dict[str, Any]:
+    """Return the OpenAI-compatible one-shot greeting event."""
     return {
         "type": "response.create",
         "response": {
@@ -78,6 +111,46 @@ def greeting_event(greeting: str) -> dict[str, Any]:
             "instructions": f"Say this greeting naturally and briefly: {greeting}",
         },
     }
+
+
+def greeting_events(provider: str, greeting: str) -> tuple[dict[str, Any], ...]:
+    if provider == "xai":
+        return (
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "Say this greeting naturally and briefly, with "
+                                f"no extra commentary: {greeting}"
+                            ),
+                        }
+                    ],
+                },
+            },
+            {"type": "response.create"},
+        )
+    return (greeting_event(greeting),)
+
+
+def connection_details(settings: Settings) -> tuple[str, dict[str, str]]:
+    query = urlencode({"model": settings.realtime_model})
+    if settings.realtime_provider == "xai":
+        return (
+            f"wss://api.x.ai/v1/realtime?{query}",
+            {"Authorization": f"Bearer {settings.realtime_api_key}"},
+        )
+    return (
+        f"wss://api.openai.com/v1/realtime?{query}",
+        {
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "OpenAI-Safety-Identifier": settings.openai_safety_identifier,
+        },
+    )
 
 
 async def _clear_queue(queue: asyncio.Queue[bytes]) -> None:
@@ -100,19 +173,17 @@ class RealtimeSIPBridge:
         self._greeting_sent = False
 
     async def run(self, call: AudioCall) -> None:
-        query = urlencode({"model": self.settings.openai_model})
-        url = f"wss://api.openai.com/v1/realtime?{query}"
-        headers = {
-            "Authorization": f"Bearer {self.settings.openai_api_key}",
-            "OpenAI-Safety-Identifier": self.settings.openai_safety_identifier,
-        }
+        url, headers = connection_details(self.settings)
+        provider = self.settings.realtime_provider
 
         tone_task = asyncio.create_task(
             self._play_connecting_tone(call), name="connecting-tone"
         )
         try:
             LOG.info(
-                "Connecting to OpenAI Realtime model %s", self.settings.openai_model
+                "Connecting to %s Realtime model %s",
+                provider,
+                self.settings.realtime_model,
             )
             async with connect(
                 url,
@@ -128,17 +199,20 @@ class RealtimeSIPBridge:
                 await websocket.send(
                     json.dumps(session_update_event(self.settings, self.profile))
                 )
-                LOG.info("OpenAI Realtime connection established")
+                LOG.info("%s Realtime connection established", provider)
 
                 tasks = [
                     asyncio.create_task(
-                        self._send_sip_audio(websocket, call), name="sip-to-openai"
+                        self._send_sip_audio(websocket, call),
+                        name=f"sip-to-{provider}",
                     ),
                     asyncio.create_task(
-                        self._receive_openai_events(websocket), name="openai-events"
+                        self._receive_realtime_events(websocket),
+                        name=f"{provider}-events",
                     ),
                     asyncio.create_task(
-                        self._play_openai_audio(call), name="openai-to-sip"
+                        self._play_realtime_audio(call),
+                        name=f"{provider}-to-sip",
                     ),
                     asyncio.create_task(self._watch_call(call), name="call-watcher"),
                 ]
@@ -189,7 +263,7 @@ class RealtimeSIPBridge:
             next_tick += INPUT_CHUNK_MS / 1000
             await asyncio.sleep(max(0, next_tick - loop.time()))
 
-    async def _receive_openai_events(self, websocket: ClientConnection) -> None:
+    async def _receive_realtime_events(self, websocket: ClientConnection) -> None:
         transcript = ""
         async for message in websocket:
             event = json.loads(message)
@@ -221,23 +295,34 @@ class RealtimeSIPBridge:
                     LOG.info("Assistant: %s", final)
                 transcript = ""
             elif event_type == "session.updated":
-                LOG.info("OpenAI Realtime session configured")
+                LOG.info(
+                    "%s Realtime session configured",
+                    self.settings.realtime_provider,
+                )
                 if self.profile.greeting and not self._greeting_sent:
-                    await websocket.send(
-                        json.dumps(greeting_event(self.profile.greeting))
-                    )
+                    for greeting in greeting_events(
+                        self.settings.realtime_provider, self.profile.greeting
+                    ):
+                        await websocket.send(json.dumps(greeting))
                     self._greeting_sent = True
             elif event_type == "error":
                 error = event.get("error", {})
                 message_text = error.get("message", json.dumps(error))
-                raise RuntimeError(f"OpenAI Realtime error: {message_text}")
-            elif event_type in {"session.created", "response.created", "response.done"}:
-                LOG.debug("OpenAI event: %s", event_type)
+                raise RuntimeError(
+                    f"{self.settings.realtime_provider} Realtime error: "
+                    f"{message_text}"
+                )
+            elif event_type in {
+                "session.created",
+                "response.created",
+                "response.done",
+            }:
+                LOG.debug("Realtime event: %s", event_type)
 
     async def _queue_frame(self, frame: bytes) -> None:
         await self.output_frames.put(frame)
 
-    async def _play_openai_audio(self, call: AudioCall) -> None:
+    async def _play_realtime_audio(self, call: AudioCall) -> None:
         loop = asyncio.get_running_loop()
         next_tick = loop.time()
         while call.state == CallState.ANSWERED:
@@ -249,7 +334,7 @@ class RealtimeSIPBridge:
                 next_tick = loop.time()
                 continue
             call.write_audio(
-                pcmu_to_pyvoip_u8(frame, gain=self.settings.openai_output_gain)
+                pcmu_to_pyvoip_u8(frame, gain=self.settings.realtime_output_gain)
             )
             self.output_frames.task_done()
             next_tick += FRAME_MS / 1000

@@ -15,28 +15,59 @@ class BotProfile:
     instructions: str
     greeting: str
     voice: str | None = None
+    xai_voice: str | None = None
 
     def configured(
-        self, prefix: str, *, include_generic: bool = True
+        self,
+        prefix: str,
+        *,
+        provider: str = "xai",
+        include_generic: bool = True,
     ) -> "BotProfile":
         """Apply profile-specific, then generic, environment overrides."""
 
-        def value(name: str, default: str) -> str:
-            profile_value = os.getenv(f"{prefix}_{name}", "").strip()
-            if profile_value:
-                return profile_value
+        provider_name = provider.upper()
+
+        def value(names: tuple[str, ...], default: str) -> str:
+            for name in names:
+                profile_value = os.getenv(f"{prefix}_{name}", "").strip()
+                if profile_value:
+                    return profile_value
             if include_generic:
-                generic_value = os.getenv(name, "").strip()
-                if generic_value:
-                    return generic_value
+                for name in names:
+                    generic_value = os.getenv(name, "").strip()
+                    if generic_value:
+                        return generic_value
             return default
+
+        text_names = (
+            "REALTIME_INSTRUCTIONS",
+            f"{provider_name}_INSTRUCTIONS",
+        )
+        greeting_names = (
+            "REALTIME_GREETING",
+            f"{provider_name}_GREETING",
+        )
+        if provider == "xai":
+            # The old names remain valid migration aliases for prompts, but not
+            # for voices because OpenAI voice IDs such as cedar are invalid at xAI.
+            text_names += ("OPENAI_INSTRUCTIONS",)
+            greeting_names += ("OPENAI_GREETING",)
+
+        voice_names = ("REALTIME_VOICE", f"{provider_name}_VOICE")
+        default_voice = self.voice_for(provider) or ""
+        selected_voice = value(voice_names, default_voice) or None
 
         return replace(
             self,
-            instructions=value("OPENAI_INSTRUCTIONS", self.instructions),
-            greeting=value("OPENAI_GREETING", self.greeting),
-            voice=value("OPENAI_VOICE", self.voice or "") or None,
+            instructions=value(text_names, self.instructions),
+            greeting=value(greeting_names, self.greeting),
+            voice=selected_voice if provider == "openai" else self.voice,
+            xai_voice=selected_voice if provider == "xai" else self.xai_voice,
         )
+
+    def voice_for(self, provider: str) -> str | None:
+        return self.xai_voice if provider == "xai" else self.voice
 
 
 ProfileSource = BotProfile | Callable[[], BotProfile]

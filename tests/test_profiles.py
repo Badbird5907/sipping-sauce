@@ -41,7 +41,9 @@ def test_spooky_profile_ignores_generic_partyline_prompt(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_INSTRUCTIONS", "You are on a party line.")
     monkeypatch.setenv("OPENAI_GREETING", "Hello, the AI is on the party line.")
 
-    profile = SPOOKY_PROFILE.configured("SPOOKY", include_generic=False)
+    profile = SPOOKY_PROFILE.configured(
+        "SPOOKY", provider="openai", include_generic=False
+    )
 
     assert "Duppy Devil" in profile.instructions
     assert "BOMBACLATT" in profile.greeting
@@ -52,7 +54,9 @@ def test_spooky_specific_override_still_wins(monkeypatch) -> None:
     monkeypatch.setenv("SPOOKY_OPENAI_GREETING", "The custom darkness answers.")
     monkeypatch.setenv("SPOOKY_OPENAI_VOICE", "marin")
 
-    profile = SPOOKY_PROFILE.configured("SPOOKY", include_generic=False)
+    profile = SPOOKY_PROFILE.configured(
+        "SPOOKY", provider="openai", include_generic=False
+    )
 
     assert profile.greeting == "The custom darkness answers."
     assert profile.voice == "marin"
@@ -61,6 +65,19 @@ def test_spooky_specific_override_still_wins(monkeypatch) -> None:
 def test_spooky_profile_ignores_generic_voice(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_VOICE", "marin")
 
-    profile = SPOOKY_PROFILE.configured("SPOOKY", include_generic=False)
+    profile = SPOOKY_PROFILE.configured(
+        "SPOOKY", provider="openai", include_generic=False
+    )
 
     assert profile.voice == "cedar"
+
+
+def test_xai_profile_uses_xai_voice_override(monkeypatch) -> None:
+    monkeypatch.setenv("SPOOKY_XAI_VOICE", "eve")
+
+    profile = SPOOKY_PROFILE.configured(
+        "SPOOKY", provider="xai", include_generic=False
+    )
+
+    assert profile.voice_for("xai") == "eve"
+    assert profile.voice_for("openai") == "cedar"
