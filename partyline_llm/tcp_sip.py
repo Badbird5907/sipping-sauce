@@ -6,6 +6,7 @@ import errno
 import logging
 import random
 import re
+import secrets
 import socket
 import struct
 from threading import Lock, Thread
@@ -28,6 +29,9 @@ from .sip_digest import digest_authorization_value
 
 
 LOG = logging.getLogger(__name__)
+DEFAULT_REGISTER_EXPIRES = 3600
+MAX_REGISTER_REFRESH_SECONDS = 15 * 60
+MIN_REGISTER_REFRESH_SECONDS = 5
 
 
 @dataclass(slots=True)
@@ -94,6 +98,20 @@ def parse_observed_address(message: SIPMessage) -> tuple[str, int] | None:
     if not received or not rport:
         return None
     return received.group(1), int(rport.group(1))
+
+
+def parse_registration_expiry(
+    message: SIPMessage, default: int = DEFAULT_REGISTER_EXPIRES
+) -> int:
+    """Return the expiry granted by the registrar, preferring Contact."""
+    contact = message.header("contact")
+    contact_expiry = re.search(r"(?:^|;)\s*expires\s*=\s*(\d+)", contact, re.I)
+    if contact_expiry:
+        return max(1, int(contact_expiry.group(1)))
+    expires = message.header("expires").strip()
+    if expires.isdigit():
+        return max(1, int(expires))
+    return default
 
 
 def parse_remote_audio(sdp: str) -> tuple[str, int]:
@@ -261,8 +279,15 @@ class TCPSIPPhone:
         self._write_lock = asyncio.Lock()
         self._incoming: asyncio.Queue[TCPAudioCall] = asyncio.Queue()
         self._calls: dict[str, TCPAudioCall] = {}
+        self._register_responses: asyncio.Queue[SIPMessage] = asyncio.Queue()
+        self._register_challenge: dict[str, str] | None = None
+        self._register_nonce_count = 0
+        self._register_cnonce = ""
+        self._register_cseq = 0
+        self._registration_expires = DEFAULT_REGISTER_EXPIRES
         self._reader_task: asyncio.Task[None] | None = None
         self._keepalive_task: asyncio.Task[None] | None = None
+        self._registration_task: asyncio.Task[None] | None = None
 
     async def connect_and_register(self) -> None:
         self.loop = asyncio.get_running_loop()
@@ -270,25 +295,26 @@ class TCPSIPPhone:
         socket_info = self.writer.get_extra_info("sockname")
         self.local_ip, self.local_port = socket_info[0], int(socket_info[1])
 
-        await self._send(self._register_message(1))
-        first = await self._read_register_response()
+        self._register_cseq = 1
+        await self._send(self._register_message(self._register_cseq))
+        first = await asyncio.wait_for(
+            self._read_register_response(), self.settings.sip_register_timeout
+        )
         observed = parse_observed_address(first)
         if observed:
             self.advertised_ip, self.advertised_port = observed
         if first.status_code == 401:
-            challenge = parse_digest_challenge(
-                first.header("www-authenticate")
+            self._update_register_challenge(first)
+            self._register_cseq += 1
+            await self._send(
+                self._register_message(
+                    self._register_cseq, self._register_authorization()
+                )
             )
-            uri = f"sip:{self.settings.sip_server}"
-            authorization = digest_authorization_value(
-                username=self.settings.sip_username,
-                password=self.settings.sip_password,
-                method="REGISTER",
-                uri=uri,
-                challenge=challenge,
+            final = await asyncio.wait_for(
+                self._read_register_response(),
+                self.settings.sip_register_timeout,
             )
-            await self._send(self._register_message(2, authorization))
-            final = await self._read_register_response()
         else:
             final = first
         if final.status_code != 200:
@@ -296,14 +322,24 @@ class TCPSIPPhone:
                 f"SIP/TCP registration failed: {final.start_line}"
             )
 
+        self._registration_expires = parse_registration_expiry(final)
         LOG.info(
-            "SIP/TCP registered %s using persistent connection %s:%s",
+            "SIP/TCP registered %s using persistent connection %s:%s "
+            "for %s seconds",
             self.settings.sip_username,
             self.advertised_ip,
             self.advertised_port,
+            self._registration_expires,
         )
-        self._reader_task = asyncio.create_task(self._message_loop())
-        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+        self._reader_task = asyncio.create_task(
+            self._message_loop(), name="sip-tcp-reader"
+        )
+        self._keepalive_task = asyncio.create_task(
+            self._keepalive_loop(), name="sip-tcp-keepalive"
+        )
+        self._registration_task = asyncio.create_task(
+            self._registration_loop(), name="sip-registration-renewal"
+        )
 
     async def _open_connection(
         self,
@@ -330,7 +366,37 @@ class TCPSIPPhone:
             )
 
     async def next_call(self) -> TCPAudioCall:
-        return await self._incoming.get()
+        incoming_task = asyncio.create_task(
+            self._incoming.get(), name="next-incoming-sip-call"
+        )
+        services = tuple(
+            task
+            for task in (
+                self._reader_task,
+                self._keepalive_task,
+                self._registration_task,
+            )
+            if task is not None
+        )
+        try:
+            done, _ = await asyncio.wait(
+                (incoming_task, *services), return_when=asyncio.FIRST_COMPLETED
+            )
+        except BaseException:
+            incoming_task.cancel()
+            await asyncio.gather(incoming_task, return_exceptions=True)
+            raise
+        stopped = next((task for task in services if task in done), None)
+        if stopped is None:
+            return incoming_task.result()
+        incoming_task.cancel()
+        await asyncio.gather(incoming_task, return_exceptions=True)
+        if stopped.cancelled():
+            raise RuntimeError(f"{stopped.get_name()} stopped unexpectedly")
+        error = stopped.exception()
+        if error is None:
+            raise RuntimeError(f"{stopped.get_name()} stopped unexpectedly")
+        raise RuntimeError(f"{stopped.get_name()} failed") from error
 
     @property
     def active_call_count(self) -> int:
@@ -342,16 +408,24 @@ class TCPSIPPhone:
         for call in list(self._calls.values()):
             call.remote_hangup()
         self._calls.clear()
-        for task in (self._reader_task, self._keepalive_task):
+        tasks = (
+            self._reader_task,
+            self._keepalive_task,
+            self._registration_task,
+        )
+        for task in tasks:
             if task:
                 task.cancel()
         await asyncio.gather(
-            *(task for task in (self._reader_task, self._keepalive_task) if task),
+            *(task for task in tasks if task),
             return_exceptions=True,
         )
         if self.writer:
-            self.writer.close()
-            await self.writer.wait_closed()
+            try:
+                self.writer.close()
+                await self.writer.wait_closed()
+            except (ConnectionError, OSError):
+                LOG.debug("SIP/TCP connection was already closed", exc_info=True)
 
     def schedule_bye(self, call: TCPAudioCall) -> None:
         if self.loop and self.loop.is_running():
@@ -364,6 +438,8 @@ class TCPSIPPhone:
         while True:
             message = await read_sip_message(self.reader)
             if message.status_code is not None:
+                if "REGISTER" in message.header("cseq").upper():
+                    self._register_responses.put_nowait(message)
                 continue
             if message.method == "INVITE":
                 await self._handle_invite(message)
@@ -458,6 +534,83 @@ class TCPSIPPhone:
         while True:
             await asyncio.sleep(15)
             await self._send("\r\n")
+
+    async def _registration_loop(self) -> None:
+        while True:
+            refresh_seconds = max(
+                MIN_REGISTER_REFRESH_SECONDS,
+                min(
+                    self._registration_expires / 2,
+                    MAX_REGISTER_REFRESH_SECONDS,
+                ),
+            )
+            LOG.debug(
+                "Refreshing SIP registration in %.1f seconds", refresh_seconds
+            )
+            await asyncio.sleep(refresh_seconds)
+            await self._renew_registration()
+
+    async def _renew_registration(self) -> None:
+        while True:
+            try:
+                self._register_responses.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        self._register_cseq += 1
+        authorization = (
+            self._register_authorization()
+            if self._register_challenge is not None
+            else None
+        )
+        await self._send(
+            self._register_message(self._register_cseq, authorization)
+        )
+        response = await asyncio.wait_for(
+            self._register_responses.get(), self.settings.sip_register_timeout
+        )
+        if response.status_code == 401:
+            self._update_register_challenge(response)
+            self._register_cseq += 1
+            await self._send(
+                self._register_message(
+                    self._register_cseq, self._register_authorization()
+                )
+            )
+            response = await asyncio.wait_for(
+                self._register_responses.get(),
+                self.settings.sip_register_timeout,
+            )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"SIP/TCP registration renewal failed: {response.start_line}"
+            )
+        self._registration_expires = parse_registration_expiry(response)
+        LOG.info(
+            "SIP/TCP registration renewed for %s seconds",
+            self._registration_expires,
+        )
+
+    def _update_register_challenge(self, response: SIPMessage) -> None:
+        self._register_challenge = parse_digest_challenge(
+            response.header("www-authenticate")
+        )
+        self._register_nonce_count = 0
+        self._register_cnonce = secrets.token_hex(8)
+
+    def _register_authorization(self) -> str:
+        if self._register_challenge is None:
+            raise RuntimeError("SIP registrar did not provide a digest challenge")
+        self._register_nonce_count += 1
+        return digest_authorization_value(
+            username=self.settings.sip_username,
+            password=self.settings.sip_password,
+            method="REGISTER",
+            uri=f"sip:{self.settings.sip_server}",
+            challenge=self._register_challenge,
+            nonce_count=self._register_nonce_count,
+            cnonce=self._register_cnonce,
+        )
 
     async def _read_register_response(self) -> SIPMessage:
         assert self.reader is not None

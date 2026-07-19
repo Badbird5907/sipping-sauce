@@ -8,9 +8,11 @@ from pyVoIP.VoIP import CallState
 
 from partyline_llm.config import Settings
 from partyline_llm.tcp_sip import (
+    SIPMessage,
     TCPSIPPhone,
     parse_digest_challenge,
     parse_remote_audio,
+    parse_registration_expiry,
     read_sip_message,
 )
 
@@ -65,6 +67,27 @@ def test_parse_remote_pcmu_audio() -> None:
         "m=audio 18000 RTP/AVP 0 101\r\n"
     )
     assert parse_remote_audio(sdp) == ("10.13.37.10", 18000)
+
+
+def test_registration_expiry_prefers_contact_parameter() -> None:
+    message = SIPMessage(
+        "SIP/2.0 200 OK",
+        {
+            "contact": ["<sip:666@example>;expires=1800"],
+            "expires": ["3600"],
+        },
+        "",
+    )
+
+    assert parse_registration_expiry(message) == 1800
+
+
+def test_registration_expiry_uses_expires_header_as_fallback() -> None:
+    message = SIPMessage(
+        "SIP/2.0 200 OK", {"expires": ["900"]}, ""
+    )
+
+    assert parse_registration_expiry(message) == 900
 
 
 def test_read_tcp_sip_message_with_body() -> None:
@@ -147,5 +170,62 @@ def test_tcp_connection_does_not_hide_other_socket_errors() -> None:
 
         assert raised.value.errno == errno.ENETUNREACH
         open_connection.assert_awaited_once()
+
+    asyncio.run(scenario())
+
+
+def test_next_call_surfaces_background_connection_failure() -> None:
+    async def scenario() -> None:
+        phone = TCPSIPPhone(settings())
+
+        async def fail_reader() -> None:
+            raise ConnectionResetError("PBX closed the connection")
+
+        phone._reader_task = asyncio.create_task(
+            fail_reader(), name="sip-tcp-reader"
+        )
+
+        with pytest.raises(RuntimeError, match="sip-tcp-reader failed") as raised:
+            await phone.next_call()
+
+        assert isinstance(raised.value.__cause__, ConnectionResetError)
+
+    asyncio.run(scenario())
+
+
+def test_registration_renewal_uses_digest_and_granted_expiry() -> None:
+    async def scenario() -> None:
+        phone = TCPSIPPhone(settings())
+        phone._register_cseq = 2
+        phone._register_challenge = {
+            "realm": "asterisk",
+            "nonce": "abc",
+            "algorithm": "MD5",
+            "qop": "auth",
+        }
+        response = SIPMessage(
+            "SIP/2.0 200 OK",
+            {
+                "cseq": ["3 REGISTER"],
+                "contact": ["<sip:666@example>;expires=600"],
+            },
+            "",
+        )
+
+        async def send_and_respond(message: str) -> None:
+            del message
+            phone._register_responses.put_nowait(response)
+
+        phone._send = AsyncMock(  # type: ignore[method-assign]
+            side_effect=send_and_respond
+        )
+
+        await phone._renew_registration()
+
+        phone._send.assert_awaited_once()
+        request = phone._send.await_args.args[0]
+        assert "CSeq: 3 REGISTER" in request
+        assert "Authorization: Digest" in request
+        assert phone._registration_expires == 600
 
     asyncio.run(scenario())
