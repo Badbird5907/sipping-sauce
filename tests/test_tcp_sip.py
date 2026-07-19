@@ -1,6 +1,9 @@
 import asyncio
+import errno
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+import pytest
 from pyVoIP.VoIP import CallState
 
 from partyline_llm.config import Settings
@@ -94,3 +97,55 @@ def test_active_call_count_tracks_answered_dialogs() -> None:
     }
 
     assert phone.active_call_count == 2
+
+
+def test_tcp_connection_falls_back_when_local_port_is_busy() -> None:
+    async def scenario() -> None:
+        phone = TCPSIPPhone(settings())
+        reader = asyncio.StreamReader()
+        writer = SimpleNamespace()
+        open_connection = AsyncMock(
+            side_effect=[
+                OSError(errno.EADDRINUSE, "Address already in use"),
+                (reader, writer),
+            ]
+        )
+
+        with patch(
+            "partyline_llm.tcp_sip.asyncio.open_connection", open_connection
+        ):
+            result = await phone._open_connection()
+
+        assert result == (reader, writer)
+        assert open_connection.await_args_list[0].kwargs["local_addr"] == (
+            "10.13.37.11",
+            5066,
+        )
+        assert open_connection.await_args_list[1].kwargs["local_addr"] == (
+            "10.13.37.11",
+            0,
+        )
+
+    asyncio.run(scenario())
+
+
+def test_tcp_connection_does_not_hide_other_socket_errors() -> None:
+    async def scenario() -> None:
+        phone = TCPSIPPhone(settings())
+        open_connection = AsyncMock(
+            side_effect=OSError(errno.ENETUNREACH, "Network unreachable")
+        )
+
+        with (
+            patch(
+                "partyline_llm.tcp_sip.asyncio.open_connection",
+                open_connection,
+            ),
+            pytest.raises(OSError) as raised,
+        ):
+            await phone._open_connection()
+
+        assert raised.value.errno == errno.ENETUNREACH
+        open_connection.assert_awaited_once()
+
+    asyncio.run(scenario())

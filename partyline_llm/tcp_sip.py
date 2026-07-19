@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import errno
 import logging
 import random
 import re
@@ -264,11 +265,7 @@ class TCPSIPPhone:
 
     async def connect_and_register(self) -> None:
         self.loop = asyncio.get_running_loop()
-        self.reader, self.writer = await asyncio.open_connection(
-            self.settings.sip_server,
-            self.settings.sip_port,
-            local_addr=(self.local_ip, self.local_port),
-        )
+        self.reader, self.writer = await self._open_connection()
         socket_info = self.writer.get_extra_info("sockname")
         self.local_ip, self.local_port = socket_info[0], int(socket_info[1])
 
@@ -306,6 +303,30 @@ class TCPSIPPhone:
         )
         self._reader_task = asyncio.create_task(self._message_loop())
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+
+    async def _open_connection(
+        self,
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        try:
+            return await asyncio.open_connection(
+                self.settings.sip_server,
+                self.settings.sip_port,
+                local_addr=(self.local_ip, self.local_port),
+            )
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE or self.local_port == 0:
+                raise
+            LOG.warning(
+                "SIP/TCP local port %s:%s is still in use; "
+                "retrying with an OS-assigned port",
+                self.local_ip,
+                self.local_port,
+            )
+            return await asyncio.open_connection(
+                self.settings.sip_server,
+                self.settings.sip_port,
+                local_addr=(self.local_ip, 0),
+            )
 
     async def next_call(self) -> TCPAudioCall:
         return await self._incoming.get()
