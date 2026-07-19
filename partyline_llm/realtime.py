@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import logging
+from typing import Any
+from urllib.parse import urlencode
+
+from pyVoIP.VoIP import CallState
+from websockets.asyncio.client import ClientConnection, connect
+
+from .audio import (
+    FRAME_BYTES,
+    FRAME_MS,
+    PCMUFrameBuffer,
+    pcmu_to_pyvoip_u8,
+    pyvoip_u8_to_pcmu,
+)
+from .call import AudioCall
+from .config import Settings
+from .profiles import BotProfile
+
+
+LOG = logging.getLogger(__name__)
+INPUT_CHUNK_MS = 40
+INPUT_CHUNK_BYTES = 8000 * INPUT_CHUNK_MS // 1000
+AUDIO_EVENT_TYPES = {"response.output_audio.delta", "response.audio.delta"}
+AUDIO_DONE_TYPES = {"response.output_audio.done", "response.audio.done"}
+TRANSCRIPT_DELTA_TYPES = {
+    "response.output_audio_transcript.delta",
+    "response.audio_transcript.delta",
+}
+
+
+def session_update_event(
+    settings: Settings, profile: BotProfile
+) -> dict[str, Any]:
+    return {
+        "type": "session.update",
+        "session": {
+            "type": "realtime",
+            "model": settings.openai_model,
+            "output_modalities": ["audio"],
+            "instructions": profile.instructions,
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcmu"},
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": settings.openai_vad_threshold,
+                        "prefix_padding_ms": (
+                            settings.openai_vad_prefix_padding_ms
+                        ),
+                        "silence_duration_ms": (
+                            settings.openai_vad_silence_duration_ms
+                        ),
+                        "create_response": True,
+                        "interrupt_response": True,
+                    },
+                },
+                "output": {
+                    "format": {"type": "audio/pcmu"},
+                    "voice": profile.voice or settings.openai_voice,
+                },
+            },
+        },
+    }
+
+
+def greeting_event(greeting: str) -> dict[str, Any]:
+    return {
+        "type": "response.create",
+        "response": {
+            "output_modalities": ["audio"],
+            "instructions": f"Say this greeting naturally and briefly: {greeting}",
+        },
+    }
+
+
+async def _clear_queue(queue: asyncio.Queue[bytes]) -> None:
+    while True:
+        try:
+            queue.get_nowait()
+            queue.task_done()
+        except asyncio.QueueEmpty:
+            return
+
+
+class RealtimeSIPBridge:
+    def __init__(self, settings: Settings, profile: BotProfile) -> None:
+        self.settings = settings
+        self.profile = profile
+        # Realtime audio can arrive faster than telephone playback. Keep every
+        # frame until it is played or deliberately cleared on caller barge-in.
+        self.output_frames: asyncio.Queue[bytes] = asyncio.Queue()
+        self.output_buffer = PCMUFrameBuffer()
+        self._greeting_sent = False
+
+    async def run(self, call: AudioCall) -> None:
+        query = urlencode({"model": self.settings.openai_model})
+        url = f"wss://api.openai.com/v1/realtime?{query}"
+        headers = {
+            "Authorization": f"Bearer {self.settings.openai_api_key}",
+            "OpenAI-Safety-Identifier": self.settings.openai_safety_identifier,
+        }
+
+        LOG.info("Connecting to OpenAI Realtime model %s", self.settings.openai_model)
+        async with connect(
+            url,
+            additional_headers=headers,
+            open_timeout=15,
+            close_timeout=5,
+            ping_interval=20,
+            ping_timeout=20,
+            max_size=None,
+        ) as websocket:
+            await websocket.send(
+                json.dumps(session_update_event(self.settings, self.profile))
+            )
+            LOG.info("OpenAI Realtime connection established")
+
+            tasks = [
+                asyncio.create_task(
+                    self._send_sip_audio(websocket, call), name="sip-to-openai"
+                ),
+                asyncio.create_task(
+                    self._receive_openai_events(websocket), name="openai-events"
+                ),
+                asyncio.create_task(
+                    self._play_openai_audio(call), name="openai-to-sip"
+                ),
+                asyncio.create_task(self._watch_call(call), name="call-watcher"),
+            ]
+            try:
+                done, pending = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                for task in done:
+                    error = task.exception()
+                    if error is not None:
+                        raise error
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _send_sip_audio(
+        self, websocket: ClientConnection, call: AudioCall
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        next_tick = loop.time()
+        while call.state == CallState.ANSWERED:
+            audio = call.read_audio(INPUT_CHUNK_BYTES, blocking=False)
+            event = {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(pyvoip_u8_to_pcmu(audio)).decode("ascii"),
+            }
+            await websocket.send(json.dumps(event))
+            next_tick += INPUT_CHUNK_MS / 1000
+            await asyncio.sleep(max(0, next_tick - loop.time()))
+
+    async def _receive_openai_events(self, websocket: ClientConnection) -> None:
+        transcript = ""
+        async for message in websocket:
+            event = json.loads(message)
+            event_type = event.get("type", "")
+
+            if event_type in AUDIO_EVENT_TYPES:
+                chunk = base64.b64decode(event.get("delta", ""))
+                for frame in self.output_buffer.append(chunk):
+                    await self._queue_frame(frame)
+            elif event_type in AUDIO_DONE_TYPES:
+                final_frame = self.output_buffer.flush()
+                if final_frame is not None:
+                    await self._queue_frame(final_frame)
+            elif event_type == "input_audio_buffer.speech_started":
+                self.output_buffer.clear()
+                await _clear_queue(self.output_frames)
+                LOG.debug("Caller speech started; cleared queued bot audio")
+            elif event_type in TRANSCRIPT_DELTA_TYPES:
+                delta = event.get("delta", "")
+                transcript += delta
+                if delta:
+                    LOG.debug("Assistant transcript delta: %s", delta)
+            elif event_type in {
+                "response.output_audio_transcript.done",
+                "response.audio_transcript.done",
+            }:
+                final = event.get("transcript", transcript).strip()
+                if final:
+                    LOG.info("Assistant: %s", final)
+                transcript = ""
+            elif event_type == "session.updated":
+                LOG.info("OpenAI Realtime session configured")
+                if self.profile.greeting and not self._greeting_sent:
+                    await websocket.send(
+                        json.dumps(greeting_event(self.profile.greeting))
+                    )
+                    self._greeting_sent = True
+            elif event_type == "error":
+                error = event.get("error", {})
+                message_text = error.get("message", json.dumps(error))
+                raise RuntimeError(f"OpenAI Realtime error: {message_text}")
+            elif event_type in {"session.created", "response.created", "response.done"}:
+                LOG.debug("OpenAI event: %s", event_type)
+
+    async def _queue_frame(self, frame: bytes) -> None:
+        await self.output_frames.put(frame)
+
+    async def _play_openai_audio(self, call: AudioCall) -> None:
+        loop = asyncio.get_running_loop()
+        next_tick = loop.time()
+        while call.state == CallState.ANSWERED:
+            try:
+                frame = await asyncio.wait_for(
+                    self.output_frames.get(), timeout=FRAME_MS / 1000
+                )
+            except TimeoutError:
+                next_tick = loop.time()
+                continue
+            call.write_audio(pcmu_to_pyvoip_u8(frame))
+            self.output_frames.task_done()
+            next_tick += FRAME_MS / 1000
+            await asyncio.sleep(max(0, next_tick - loop.time()))
+
+    async def _watch_call(self, call: AudioCall) -> None:
+        while call.state == CallState.ANSWERED:
+            await asyncio.sleep(0.1)
+        LOG.info("SIP call ended")
