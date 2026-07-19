@@ -182,12 +182,12 @@ SPOOKY_PROFILES = (
         greeting="I'm your worst nightmare, what's your name?",
         voice="cedar",
     ),
-    BotProfile(
-        name="wendys",
-        instructions=(
-            "You are a Wendy's employee who is answering calls to extension 666"
-        )
-    )
+    # BotProfile(
+    #     name="wendys",
+    #     instructions=(
+    #         "You are a Wendy's employee who is answering calls to extension 666"
+    #     )
+    # )
     # BotProfile(
     #     name="hell-cruise-director",
     #     instructions=(
