@@ -18,9 +18,10 @@ from .audio import (
     pyvoip_u8_to_pcmu,
     telephone_tone,
 )
-from .call import AudioCall
+from .call import AudioCall, CallAudioObserver
 from .config import Settings
 from .profiles import BotProfile
+from .recording import CallMonitor
 
 
 LOG = logging.getLogger(__name__)
@@ -163,9 +164,15 @@ async def _clear_queue(queue: asyncio.Queue[bytes]) -> None:
 
 
 class RealtimeSIPBridge:
-    def __init__(self, settings: Settings, profile: BotProfile) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        profile: BotProfile,
+        audio_observer: CallAudioObserver | None = None,
+    ) -> None:
         self.settings = settings
         self.profile = profile
+        self.audio_observer = audio_observer
         # Realtime audio can arrive faster than telephone playback. Keep every
         # frame until it is played or deliberately cleared on caller barge-in.
         self.output_frames: asyncio.Queue[bytes] = asyncio.Queue()
@@ -243,7 +250,7 @@ class RealtimeSIPBridge:
         offset = 0
         while call.state == CallState.ANSWERED:
             frame = CONNECTING_TONE[offset : offset + FRAME_BYTES]
-            call.write_audio(frame)
+            self._write_bot_audio(call, frame)
             offset = (offset + FRAME_BYTES) % len(CONNECTING_TONE)
             next_tick += FRAME_MS / 1000
             await asyncio.sleep(max(0, next_tick - loop.time()))
@@ -255,6 +262,8 @@ class RealtimeSIPBridge:
         next_tick = loop.time()
         while call.state == CallState.ANSWERED:
             audio = call.read_audio(INPUT_CHUNK_BYTES, blocking=False)
+            if self.audio_observer is not None:
+                self.audio_observer.caller_audio(audio)
             event = {
                 "type": "input_audio_buffer.append",
                 "audio": base64.b64encode(pyvoip_u8_to_pcmu(audio)).decode("ascii"),
@@ -333,8 +342,11 @@ class RealtimeSIPBridge:
             except TimeoutError:
                 next_tick = loop.time()
                 continue
-            call.write_audio(
-                pcmu_to_pyvoip_u8(frame, gain=self.settings.realtime_output_gain)
+            self._write_bot_audio(
+                call,
+                pcmu_to_pyvoip_u8(
+                    frame, gain=self.settings.realtime_output_gain
+                ),
             )
             self.output_frames.task_done()
             next_tick += FRAME_MS / 1000
@@ -344,3 +356,30 @@ class RealtimeSIPBridge:
         while call.state == CallState.ANSWERED:
             await asyncio.sleep(0.1)
         LOG.info("SIP call ended")
+
+    def _write_bot_audio(self, call: AudioCall, audio: bytes) -> None:
+        call.write_audio(audio)
+        if self.audio_observer is not None:
+            self.audio_observer.bot_audio(audio)
+
+
+async def run_realtime_bridge(
+    settings: Settings,
+    profile: BotProfile,
+    call: AudioCall,
+    *,
+    monitor: CallMonitor | None = None,
+    caller: str = "unknown",
+    direction: str = "incoming",
+    sip_call_id: str | None = None,
+) -> None:
+    if monitor is None:
+        await RealtimeSIPBridge(settings, profile).run(call)
+        return
+    async with monitor.track(
+        caller=caller,
+        direction=direction,
+        profile=profile.name,
+        sip_call_id=sip_call_id,
+    ) as session:
+        await RealtimeSIPBridge(settings, profile, session).run(call)

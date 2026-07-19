@@ -9,7 +9,8 @@ from pyVoIP.VoIP import CallState, InvalidStateError, VoIPCall, VoIPPhone
 from .config import Settings
 from .phone import create_phone, safe_hangup, wait_for_registration
 from .profiles import ProfileSource, resolve_profile
-from .realtime import RealtimeSIPBridge
+from .realtime import run_realtime_bridge
+from .recording import CallMonitor
 
 
 LOG = logging.getLogger(__name__)
@@ -18,9 +19,15 @@ LOG = logging.getLogger(__name__)
 class SIPIncomingClient:
     """Register a SIP endpoint and bridge one incoming call at a time."""
 
-    def __init__(self, settings: Settings, profile: ProfileSource) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        profile: ProfileSource,
+        monitor: CallMonitor | None = None,
+    ) -> None:
         self.settings = settings
         self.profile = profile
+        self.monitor = monitor
         self.phone: VoIPPhone | None = None
         self.call: VoIPCall | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -101,9 +108,15 @@ class SIPIncomingClient:
                     self.call.answer()
                     selected_profile = resolve_profile(self.profile)
                     LOG.info("Using personality %s", selected_profile.name)
-                    await RealtimeSIPBridge(
-                        self.settings, selected_profile
-                    ).run(self.call)
+                    await run_realtime_bridge(
+                        self.settings,
+                        selected_profile,
+                        self.call,
+                        monitor=self.monitor,
+                        caller=caller,
+                        direction="incoming",
+                        sip_call_id=getattr(self.call, "call_id", None),
+                    )
                 except Exception:
                     LOG.exception("Incoming call session failed")
                 finally:
@@ -127,16 +140,22 @@ class SIPIncomingClient:
 
 
 async def run_incoming_forever(
-    settings: Settings, profile: ProfileSource, *, once: bool = False
+    settings: Settings,
+    profile: ProfileSource,
+    *,
+    once: bool = False,
+    monitor: CallMonitor | None = None,
 ) -> None:
     if settings.sip_transport == "tcp":
         from .tcp_sip import run_tcp_incoming_forever
 
-        await run_tcp_incoming_forever(settings, profile, once=once)
+        await run_tcp_incoming_forever(
+            settings, profile, once=once, monitor=monitor
+        )
         return
 
     while True:
-        client = SIPIncomingClient(settings, profile)
+        client = SIPIncomingClient(settings, profile, monitor)
         try:
             await client.run(once=once)
         except asyncio.CancelledError:

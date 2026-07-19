@@ -16,6 +16,11 @@ def base_env(monkeypatch) -> None:
         "OPENAI_REALTIME_MODEL",
         "XAI_VOICE",
         "OPENAI_VOICE",
+        "RECORD_CALLS",
+        "RECORDINGS_DIR",
+        "WEBUI_ENABLED",
+        "WEBUI_HOST",
+        "WEBUI_PORT",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -51,3 +56,19 @@ def test_selected_provider_requires_its_own_key(monkeypatch) -> None:
 
     with pytest.raises(ConfigurationError, match="XAI_API_KEY"):
         Settings.from_env(None)
+
+
+def test_recording_and_dashboard_settings(monkeypatch) -> None:
+    base_env(monkeypatch)
+    monkeypatch.setenv("XAI_API_KEY", "xai-key")
+    monkeypatch.setenv("RECORD_CALLS", "false")
+    monkeypatch.setenv("RECORDINGS_DIR", "/tmp/booth-recordings")
+    monkeypatch.setenv("WEBUI_HOST", "127.0.0.1")
+    monkeypatch.setenv("WEBUI_PORT", "9090")
+
+    settings = Settings.from_env(None)
+
+    assert not settings.record_calls
+    assert settings.recordings_dir == "/tmp/booth-recordings"
+    assert settings.webui_host == "127.0.0.1"
+    assert settings.webui_port == 9090

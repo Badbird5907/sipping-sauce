@@ -52,6 +52,15 @@ def _optional(name: str) -> str:
     return os.getenv(name, "").strip()
 
 
+def _boolean(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "true" if default else "false").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"{name} must be true or false")
+
+
 def _provider_number(
     provider: str,
     suffix: str,
@@ -115,6 +124,11 @@ class Settings:
     reconnect_seconds: float
     log_level: str
     realtime_output_gain: float = 2.0
+    record_calls: bool = True
+    recordings_dir: str = "recordings"
+    webui_enabled: bool = True
+    webui_host: str = "0.0.0.0"
+    webui_port: int = 8080
 
     @classmethod
     def from_env(
@@ -127,6 +141,7 @@ class Settings:
         sip_rtp_port_low_default: int = 40000,
         sip_rtp_port_high_default: int = 40100,
         max_concurrent_calls_default: int = 1,
+        webui_port_default: int = 8080,
     ) -> "Settings":
         if env_file:
             load_dotenv(dotenv_path=env_file, override=True)
@@ -186,6 +201,10 @@ class Settings:
                 f"{maximum_vad_threshold:g}"
             )
 
+        webui_port = _integer("WEBUI_PORT", webui_port_default, minimum=0)
+        if webui_port > 65535:
+            raise ConfigurationError("WEBUI_PORT must be at most 65535")
+
         return cls(
             realtime_provider=provider,
             xai_api_key=xai_api_key,
@@ -231,6 +250,13 @@ class Settings:
             realtime_output_gain=_provider_number(
                 provider, "OUTPUT_GAIN", 2.0
             ),
+            record_calls=_boolean("RECORD_CALLS", True),
+            recordings_dir=os.getenv("RECORDINGS_DIR", "recordings").strip()
+            or "recordings",
+            webui_enabled=_boolean("WEBUI_ENABLED", True),
+            webui_host=os.getenv("WEBUI_HOST", "0.0.0.0").strip()
+            or "0.0.0.0",
+            webui_port=webui_port,
         )
 
     @property
@@ -260,5 +286,6 @@ class Settings:
             f"from {self.sip_local_ip}:{self.sip_local_port}, "
             f"party line {self.sip_partyline}, {self.realtime_provider} model "
             f"{self.realtime_model}, "
-            f"max calls {self.max_concurrent_calls}"
+            f"max calls {self.max_concurrent_calls}, "
+            f"dashboard {self.webui_host}:{self.webui_port}"
         )

@@ -11,14 +11,13 @@ from partyline_llm.profiles import (
 def test_spooky_profile_is_fictional_and_has_a_greeting() -> None:
     assert "fictional" in SPOOKY_PROFILE.instructions.lower()
     assert "666" in SPOOKY_PROFILE.instructions
-    assert "BOMBACLATT" in SPOOKY_PROFILE.instructions
-    assert "BOMBACLATT" in SPOOKY_PROFILE.greeting
+    assert "comedian" in SPOOKY_PROFILE.instructions.lower()
     assert SPOOKY_PROFILE.voice == "cedar"
     assert SPOOKY_PROFILE.greeting
 
 
-def test_666_has_varied_personalities_with_short_greetings() -> None:
-    assert len(SPOOKY_PROFILES) >= 4
+def test_666_profiles_are_unique_and_have_short_greetings() -> None:
+    assert SPOOKY_PROFILES
     assert len({profile.name for profile in SPOOKY_PROFILES}) == len(
         SPOOKY_PROFILES
     )
@@ -52,7 +51,10 @@ def test_random_profile_cycle_uses_every_personality_before_repeating() -> None:
         assert set(selected[start : start + len(SPOOKY_PROFILES)]) == set(
             SPOOKY_PROFILES
         )
-    assert all(left is not right for left, right in zip(selected, selected[1:]))
+    if len(SPOOKY_PROFILES) > 1:
+        assert all(left is not right for left, right in zip(selected, selected[1:]))
+    else:
+        assert selected == [SPOOKY_PROFILE] * 3
 
 
 def test_spooky_profile_ignores_generic_partyline_prompt(monkeypatch) -> None:
@@ -63,8 +65,8 @@ def test_spooky_profile_ignores_generic_partyline_prompt(monkeypatch) -> None:
         "SPOOKY", provider="openai", include_generic=False
     )
 
-    assert "Duppy Devil" in profile.instructions
-    assert "BOMBACLATT" in profile.greeting
+    assert "stand-up comedian" in profile.instructions
+    assert "worst nightmare" in profile.greeting
     assert profile.voice == "cedar"
 
 

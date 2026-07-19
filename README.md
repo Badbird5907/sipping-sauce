@@ -134,6 +134,32 @@ uv run spooky-llm --once
 Both versions can run simultaneously because their example configurations use
 different local SIP ports and RTP ranges.
 
+## Call recordings and booth dashboard
+
+Both executables record calls by default and start a small dashboard alongside
+the SIP service. Open the spooky-bot dashboard from another device on the booth
+LAN at:
+
+```text
+http://<raspberry-pi-address>:8080
+```
+
+The outgoing party-line bot uses port `8081` in `.env.example`, allowing both
+dashboards to run at the same time. The dashboard shows active calls, elapsed
+time, the selected personality, completed recordings, and audio players. Click
+**Listen live** on an active session to hear a low-latency mixed feed in the
+browser. Browsers require that click before they permit audio playback.
+
+Recordings are saved as 8 kHz stereo WAV files under `recordings/`: caller audio
+is the left channel and bot audio is the right channel. A JSON metadata file is
+written beside each WAV so recordings remain visible after a restart. The
+dashboard supports HTTP byte ranges, so completed calls can be played and
+seeked without downloading the entire file first.
+
+The dashboard has no login and `WEBUI_HOST=0.0.0.0` makes it reachable from the
+local network. Keep it on the booth LAN, or set `WEBUI_HOST=127.0.0.1` if it
+should only be available on the Pi itself.
+
 Run the test suite with:
 
 ```powershell
@@ -170,6 +196,12 @@ passwords are never written to logs.
 - `RECONNECT_SECONDS`: delay before another registration/call attempt.
 - `MAX_CONCURRENT_CALLS`: simultaneous incoming TCP calls; defaults to `4` for
   `spooky-llm`.
+- `RECORD_CALLS`: records both sides of each call when true; defaults to true.
+- `RECORDINGS_DIR`: WAV and JSON storage directory; defaults to `recordings`.
+- `WEBUI_ENABLED`: starts the recordings/session dashboard when true.
+- `WEBUI_HOST`: dashboard bind address; defaults to `0.0.0.0`.
+- `WEBUI_PORT`: dashboard port; the examples use `8080` for `spooky-llm` and
+  `8081` for `partyline-llm`.
 - `PARTYLINE_REALTIME_INSTRUCTIONS` and `PARTYLINE_REALTIME_GREETING`: override
   the party-line personality without changing the spooky bot.
 - `SPOOKY_REALTIME_INSTRUCTIONS`, `SPOOKY_REALTIME_GREETING`, and the

@@ -8,7 +8,8 @@ from pyVoIP.VoIP import VoIPCall, VoIPPhone
 from .config import Settings
 from .phone import create_phone, safe_hangup, wait_for_answer, wait_for_registration
 from .profiles import BotProfile, PARTYLINE_PROFILE
-from .realtime import RealtimeSIPBridge
+from .realtime import run_realtime_bridge
+from .recording import CallMonitor
 
 
 LOG = logging.getLogger(__name__)
@@ -16,10 +17,14 @@ LOG = logging.getLogger(__name__)
 
 class SIPPartyLineClient:
     def __init__(
-        self, settings: Settings, profile: BotProfile = PARTYLINE_PROFILE
+        self,
+        settings: Settings,
+        profile: BotProfile = PARTYLINE_PROFILE,
+        monitor: CallMonitor | None = None,
     ) -> None:
         self.settings = settings
         self.profile = profile
+        self.monitor = monitor
         self.phone: VoIPPhone | None = None
         self.call: VoIPCall | None = None
 
@@ -44,7 +49,15 @@ class SIPPartyLineClient:
             await wait_for_answer(self.call, self.settings.sip_answer_timeout)
             LOG.info("Joined party line %s", self.settings.sip_partyline)
 
-            await RealtimeSIPBridge(self.settings, self.profile).run(self.call)
+            await run_realtime_bridge(
+                self.settings,
+                self.profile,
+                self.call,
+                monitor=self.monitor,
+                caller=self.settings.sip_partyline,
+                direction="outbound",
+                sip_call_id=getattr(self.call, "call_id", None),
+            )
         finally:
             self.close()
 
@@ -61,9 +74,10 @@ async def run_forever(
     profile: BotProfile = PARTYLINE_PROFILE,
     *,
     once: bool = False,
+    monitor: CallMonitor | None = None,
 ) -> None:
     while True:
-        client = SIPPartyLineClient(settings, profile)
+        client = SIPPartyLineClient(settings, profile, monitor)
         try:
             await client.run_once()
         except asyncio.CancelledError:

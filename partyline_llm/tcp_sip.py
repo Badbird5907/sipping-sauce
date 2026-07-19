@@ -22,7 +22,8 @@ from .audio import (
 )
 from .config import Settings
 from .profiles import ProfileSource, resolve_profile
-from .realtime import RealtimeSIPBridge
+from .realtime import run_realtime_bridge
+from .recording import CallMonitor
 from .sip_digest import digest_authorization_value
 
 
@@ -566,7 +567,11 @@ class TCPSIPPhone:
 
 
 async def run_tcp_incoming_forever(
-    settings: Settings, profile: ProfileSource, *, once: bool = False
+    settings: Settings,
+    profile: ProfileSource,
+    *,
+    once: bool = False,
+    monitor: CallMonitor | None = None,
 ) -> None:
     async def serve_call(phone: TCPSIPPhone, call: TCPAudioCall) -> None:
         selected_profile = resolve_profile(profile)
@@ -578,7 +583,18 @@ async def run_tcp_incoming_forever(
             settings.max_concurrent_calls,
         )
         try:
-            await RealtimeSIPBridge(settings, selected_profile).run(call)
+            from_header = call.invite.header("from")
+            caller_match = re.search(r"sip:([^@;>]+)", from_header, re.I)
+            caller = caller_match.group(1) if caller_match else from_header
+            await run_realtime_bridge(
+                settings,
+                selected_profile,
+                call,
+                monitor=monitor,
+                caller=caller or "unknown",
+                direction="incoming",
+                sip_call_id=call.call_id,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:

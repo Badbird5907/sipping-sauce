@@ -36,6 +36,7 @@ def load_settings_or_exit(
     sip_rtp_port_low_default: int = 40000,
     sip_rtp_port_high_default: int = 40100,
     max_concurrent_calls_default: int = 1,
+    webui_port_default: int = 8080,
 ) -> Settings:
     try:
         return Settings.from_env(
@@ -46,6 +47,7 @@ def load_settings_or_exit(
             sip_rtp_port_low_default=sip_rtp_port_low_default,
             sip_rtp_port_high_default=sip_rtp_port_high_default,
             max_concurrent_calls_default=max_concurrent_calls_default,
+            webui_port_default=webui_port_default,
         )
     except ConfigurationError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
