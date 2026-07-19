@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import audioop
+import math
 
 
 SAMPLE_RATE = 8000
@@ -10,15 +11,44 @@ PYVOIP_SILENCE = b"\x80"
 PCMU_SILENCE = b"\xff"
 
 
+def telephone_tone(
+    frequencies: tuple[float, ...],
+    *,
+    duration_ms: int = 100,
+    level: float = 12.0,
+) -> bytes:
+    """Generate an unsigned 8-bit telephone tone with a seamless loop."""
+    sample_count = SAMPLE_RATE * duration_ms // 1000
+    return bytes(
+        max(
+            0,
+            min(
+                255,
+                round(
+                    128
+                    + level
+                    * sum(
+                        math.sin(2 * math.pi * frequency * sample / SAMPLE_RATE)
+                        for frequency in frequencies
+                    )
+                ),
+            ),
+        )
+        for sample in range(sample_count)
+    )
+
+
 def pyvoip_u8_to_pcmu(audio: bytes) -> bytes:
     """Convert PyVoIP unsigned 8-bit linear PCM into G.711 mu-law."""
     signed_pcm = audioop.bias(audio, 1, -128)
     return audioop.lin2ulaw(signed_pcm, 1)
 
 
-def pcmu_to_pyvoip_u8(audio: bytes) -> bytes:
-    """Convert G.711 mu-law into PyVoIP unsigned 8-bit linear PCM."""
+def pcmu_to_pyvoip_u8(audio: bytes, gain: float = 1.0) -> bytes:
+    """Convert G.711 mu-law into amplified PyVoIP unsigned 8-bit PCM."""
     signed_pcm = audioop.ulaw2lin(audio, 1)
+    if gain != 1.0:
+        signed_pcm = audioop.mul(signed_pcm, 1, gain)
     return audioop.bias(signed_pcm, 1, 128)
 
 
@@ -46,4 +76,3 @@ class PCMUFrameBuffer:
 
     def clear(self) -> None:
         self._buffer.clear()
-

@@ -1,8 +1,11 @@
 import asyncio
 
+from pyVoIP.VoIP import CallState
+
 from partyline_llm.config import Settings
 from partyline_llm.profiles import PARTYLINE_PROFILE, SPOOKY_PROFILE
 from partyline_llm.realtime import (
+    CONNECTING_TONE,
     RealtimeSIPBridge,
     greeting_event,
     session_update_event,
@@ -71,5 +74,28 @@ def test_audio_queue_does_not_drop_long_responses() -> None:
         for index in range(600):
             await bridge._queue_frame(bytes([index % 256]))
         assert bridge.output_frames.qsize() == 600
+
+    asyncio.run(scenario())
+
+
+def test_connecting_tone_starts_immediately() -> None:
+    class FakeCall:
+        state = CallState.ANSWERED
+
+        def __init__(self) -> None:
+            self.writes: list[bytes] = []
+
+        def write_audio(self, data: bytes) -> None:
+            self.writes.append(data)
+
+    async def scenario() -> None:
+        bridge = RealtimeSIPBridge(settings(), PARTYLINE_PROFILE)
+        call = FakeCall()
+        task = asyncio.create_task(bridge._play_connecting_tone(call))
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+        assert call.writes == [CONNECTING_TONE[:160]]
 
     asyncio.run(scenario())

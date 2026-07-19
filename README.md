@@ -144,6 +144,8 @@ passwords are never written to logs.
 
 - `OPENAI_REALTIME_MODEL`: defaults to `gpt-realtime-2.1`.
 - `OPENAI_VOICE`: defaults to `marin`.
+- `OPENAI_OUTPUT_GAIN`: playback amplification applied to the bot voice; defaults
+  to `2.0` (about +6 dB), with clipping at the telephone codec's limits.
 - `SPOOKY_OPENAI_VOICE`: defaults to `cedar` for the extension-666 character
   and overrides the generic voice only for `spooky-llm`.
 - `OPENAI_VAD_THRESHOLD`: speech activation threshold from `0` to `1`; defaults
@@ -170,7 +172,9 @@ passwords are never written to logs.
 
 The audio path is full duplex. OpenAI's server voice activity detection
 decides when someone has finished a turn, and queued bot audio is dropped when
-new caller speech begins so interruptions feel natural.
+new caller speech begins so interruptions feel natural. A quiet telephone dial
+tone plays after the SIP call connects and stops when the OpenAI WebSocket is
+ready.
 
 ## Adding another version
 

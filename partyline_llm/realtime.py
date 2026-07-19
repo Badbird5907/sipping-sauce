@@ -16,6 +16,7 @@ from .audio import (
     PCMUFrameBuffer,
     pcmu_to_pyvoip_u8,
     pyvoip_u8_to_pcmu,
+    telephone_tone,
 )
 from .call import AudioCall
 from .config import Settings
@@ -31,6 +32,7 @@ TRANSCRIPT_DELTA_TYPES = {
     "response.output_audio_transcript.delta",
     "response.audio_transcript.delta",
 }
+CONNECTING_TONE = telephone_tone((350, 440))
 
 
 def session_update_event(
@@ -105,49 +107,72 @@ class RealtimeSIPBridge:
             "OpenAI-Safety-Identifier": self.settings.openai_safety_identifier,
         }
 
-        LOG.info("Connecting to OpenAI Realtime model %s", self.settings.openai_model)
-        async with connect(
-            url,
-            additional_headers=headers,
-            open_timeout=15,
-            close_timeout=5,
-            ping_interval=20,
-            ping_timeout=20,
-            max_size=None,
-        ) as websocket:
-            await websocket.send(
-                json.dumps(session_update_event(self.settings, self.profile))
+        tone_task = asyncio.create_task(
+            self._play_connecting_tone(call), name="connecting-tone"
+        )
+        try:
+            LOG.info(
+                "Connecting to OpenAI Realtime model %s", self.settings.openai_model
             )
-            LOG.info("OpenAI Realtime connection established")
-
-            tasks = [
-                asyncio.create_task(
-                    self._send_sip_audio(websocket, call), name="sip-to-openai"
-                ),
-                asyncio.create_task(
-                    self._receive_openai_events(websocket), name="openai-events"
-                ),
-                asyncio.create_task(
-                    self._play_openai_audio(call), name="openai-to-sip"
-                ),
-                asyncio.create_task(self._watch_call(call), name="call-watcher"),
-            ]
-            try:
-                done, pending = await asyncio.wait(
-                    tasks, return_when=asyncio.FIRST_COMPLETED
+            async with connect(
+                url,
+                additional_headers=headers,
+                open_timeout=15,
+                close_timeout=5,
+                ping_interval=20,
+                ping_timeout=20,
+                max_size=None,
+            ) as websocket:
+                tone_task.cancel()
+                await asyncio.gather(tone_task, return_exceptions=True)
+                await websocket.send(
+                    json.dumps(session_update_event(self.settings, self.profile))
                 )
-                for task in pending:
-                    task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
-                for task in done:
-                    error = task.exception()
-                    if error is not None:
-                        raise error
-            finally:
-                for task in tasks:
-                    if not task.done():
+                LOG.info("OpenAI Realtime connection established")
+
+                tasks = [
+                    asyncio.create_task(
+                        self._send_sip_audio(websocket, call), name="sip-to-openai"
+                    ),
+                    asyncio.create_task(
+                        self._receive_openai_events(websocket), name="openai-events"
+                    ),
+                    asyncio.create_task(
+                        self._play_openai_audio(call), name="openai-to-sip"
+                    ),
+                    asyncio.create_task(self._watch_call(call), name="call-watcher"),
+                ]
+                try:
+                    done, pending = await asyncio.wait(
+                        tasks, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for task in pending:
                         task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    for task in done:
+                        error = task.exception()
+                        if error is not None:
+                            raise error
+                finally:
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            if not tone_task.done():
+                tone_task.cancel()
+            await asyncio.gather(tone_task, return_exceptions=True)
+
+    async def _play_connecting_tone(self, call: AudioCall) -> None:
+        loop = asyncio.get_running_loop()
+        next_tick = loop.time()
+        offset = 0
+        while call.state == CallState.ANSWERED:
+            frame = CONNECTING_TONE[offset : offset + FRAME_BYTES]
+            call.write_audio(frame)
+            offset = (offset + FRAME_BYTES) % len(CONNECTING_TONE)
+            next_tick += FRAME_MS / 1000
+            await asyncio.sleep(max(0, next_tick - loop.time()))
 
     async def _send_sip_audio(
         self, websocket: ClientConnection, call: AudioCall
@@ -223,7 +248,9 @@ class RealtimeSIPBridge:
             except TimeoutError:
                 next_tick = loop.time()
                 continue
-            call.write_audio(pcmu_to_pyvoip_u8(frame))
+            call.write_audio(
+                pcmu_to_pyvoip_u8(frame, gain=self.settings.openai_output_gain)
+            )
             self.output_frames.task_done()
             next_tick += FRAME_MS / 1000
             await asyncio.sleep(max(0, next_tick - loop.time()))

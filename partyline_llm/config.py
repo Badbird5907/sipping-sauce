@@ -72,6 +72,7 @@ class Settings:
     max_concurrent_calls: int
     reconnect_seconds: float
     log_level: str
+    openai_output_gain: float = 2.0
 
     @classmethod
     def from_env(
@@ -156,6 +157,7 @@ class Settings:
             ),
             reconnect_seconds=_number("RECONNECT_SECONDS", 5),
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
+            openai_output_gain=_number("OPENAI_OUTPUT_GAIN", 2.0),
         )
 
     def summary(self) -> str:
