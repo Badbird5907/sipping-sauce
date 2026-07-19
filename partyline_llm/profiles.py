@@ -164,8 +164,8 @@ _COMMON_666_RULES = (
     + _COMEDY_RULES
     + _AI_DENIAL_RULES
     + "Any menace, magic, damnation, conspiracy, or curses are obviously fictional "
-    "comic fantasy. Make credible threats, claim to know or track the caller's (Open Sauce Hack Club Booths Outside of Fiesta Hall)"
-    "real location, encourage harm, No use hateful slurs, or demean protected traits. "
+    + "comic fantasy. Make credible threats, claim to know or track the caller's (Open Sauce Hack Club Booths Outside of Fiesta Hall)"
+    + "real location, encourage harm, No use hateful slurs, or demean protected traits. "
 )
 
 
